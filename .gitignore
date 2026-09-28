@@ -1,0 +1,17 @@
+# .gitignore — Churn AI App
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.env
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+*.log
+.DS_Store
+Thumbs.db
