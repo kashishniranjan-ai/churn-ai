@@ -6,7 +6,9 @@ checking by hand.
 
 - **Base URL (local):** `http://localhost:8000`
 - **Interactive docs:** `/docs` (Swagger) · `/redoc` · raw schema `/openapi.json`
-- **Automated suite:** `python -m pytest tests/ -v` → 31 tests
+- **Automated suite:** `python -m pytest tests/ -v` → 31 tests, run on every
+  push/PR by [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) (which
+  reports 30 passed + 1 skipped, because the dataset is not in the repo)
 
 Start the service first:
 
@@ -44,7 +46,7 @@ curl -s http://localhost:8000/metrics | python -m json.tool
 ```
 
 `200` with the full training report: every candidate's CV score, `test_metrics`,
-`baselines` (majority-class accuracy, always-positive precision/F1) and
+`baselines` (`majority_class_accuracy`, `always_predict_repeat_f1`) and
 `campaign_metrics` (precision + lift at the top 10/20/30%). Returns `404` if
 `training_metrics.json` is absent.
 
@@ -228,5 +230,13 @@ unknown extra key → 200.
   is an extrapolation, and the probabilities are not calibrated.
 - **`422` bodies use FastAPI's default shape.** Fine to read; if your client
   branches on `detail[].loc`, pin that assumption.
+- **CI gates the pytest suite, not this collection.** `ci.yml` blocks on the
+  unit/API tests plus the artifact and boot checks, but the Newman run of
+  `postman_collection.json` is `continue-on-error` until it has been observed
+  green — so contract regressions are *reported* here without yet *failing* a
+  build. Remove that line to make this document enforceable.
+- **CI covers one interpreter.** Only Python 3.13 is exercised, matching the
+  Docker image; the 3.11+ floor in the README is an inference from the pins, not
+  a tested claim.
 
 

@@ -1,5 +1,7 @@
 # 🛍️ Will Repeat? — Repeat-Purchase Prediction API
 
+[![CI](https://github.com/kashishniranjan-ai/churn-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/kashishniranjan-ai/churn-ai/actions/workflows/ci.yml)
+
 An ML service that answers one business question: **"which of these customers
 will place another order next quarter?"**
 
@@ -66,6 +68,8 @@ streamlit run frontend/dashboard.py
 The API refuses to start if `model/customer_prediction_pipeline.joblib` is
 missing, and fails at startup if the Pydantic schema's feature order drifts from
 `model/feature_metadata.json` — a mismatch would silently scramble predictions,
+so the service crashes instead of serving wrong scores.
+
 ---
 
 ## 🔗 API reference
@@ -148,6 +152,7 @@ max 500 per call, returns `{"count": N, "predictions": [...]}`.
 More examples, expected responses and failure cases:
 **[docs/API_TESTING.md](docs/API_TESTING.md)** · importable collection:
 `docs/postman_collection.json`.
+
 ---
 
 ## 📊 How good is the model?
@@ -233,8 +238,29 @@ and `/metrics` payloads, single + batch prediction, threshold boundary behaviour
 consistency, rejection of missing and out-of-range fields (`422`), batch size
 limits, acceptance of unknown extra keys so older clients stay compatible,
 drivers grounded in real features, and **inference on real customers taken from
-`retail.db`** (skipped automatically if the DB or artifacts are absent, so CI
-never fails for a missing 23 MB download).
+`retail.db`**.
+
+### CI
+
+`.github/workflows/ci.yml` runs on every push to `main`, on every pull request,
+and on demand:
+
+| Step | What it actually proves |
+|---|---|
+| Artifacts load | `model/*` is committed, non-empty and loadable — and scikit-learn's `InconsistentVersionWarning` is escalated to an error, so artifact/pin drift fails the build instead of quietly degrading explanations |
+| App boots | Real lifespan startup through the production code path: `/health` says `healthy`, `/metrics` reports ROC-AUC > 0.5, `/features` order matches `FEATURE_ORDER` |
+| Test suite | `python -m pytest tests/ -v` — **30 passed, 1 skipped** |
+| API contract | Newman runs `docs/postman_collection.json` against a live server — `continue-on-error` for now, see below |
+
+CI never downloads the 23 MB dataset: `data/processed/` is gitignored, so the one
+DB-backed test (`test_predicts_real_customers`) skips itself and the count drops
+from the local 31 to 30 + 1 skipped. That gap is deliberate, but it is also how a
+regression could hide — if the skip count ever changes, the suite changed.
+
+The Newman job is informational rather than blocking because the collection has
+never been executed end to end in the authoring environment (Node isn't
+installed). Delete its `continue-on-error` line once it has been seen green and
+it becomes the contract gate.
 
 ---
 
@@ -352,6 +378,7 @@ churn-ai-app/
 │   ├── insights.md          # data-analysis findings
 │   ├── API_TESTING.md       # endpoint walkthrough + expected responses
 │   └── postman_collection.json
+├── .github/workflows/ci.yml # CI: artifact gates + boot check + pytest (+ Newman)
 ├── Dockerfile               # targets: api (default) | dashboard
 ├── docker-compose.yml
 ├── render.yaml
@@ -387,7 +414,10 @@ churn-ai-app/
 4. **Richer features** — product categories, order cadence, seasonality, country;
    then re-run the model selection that currently favours logistic regression.
 5. **Ops** — API auth + rate limiting, prediction logging, drift monitoring
-   against `feature_stats` in `feature_metadata.json`, CI for the test suite.
+   against `feature_stats` in `feature_metadata.json`. CI runs the suite on
+   every push; what is left is promoting the Newman contract job to a blocking
+   check and testing more than the single Python version (3.13) these artifacts
+   were verified against, since the README only claims a 3.11+ floor.
 
 ---
 
