@@ -1,60 +1,78 @@
+# syntax=docker/dockerfile:1
 # ===========================================================================
-# Dockerfile — Customer Churn Predictor
+# Repeat-Purchase Prediction — container build
 # ===========================================================================
-# Multi-stage build optimized for production. Installs only runtime deps,
-# copies serialized model artifacts, and exposes both the FastAPI backend
-# and the Streamlit frontend via a supervisor process.
+# Two targets share one dependency layer:
+#
+#   api        FastAPI prediction service  <- default (last stage, deployable)
+#   dashboard  Streamlit UI pointed at the API
+#
+#   docker build -t churn-api .                        # API only
+#   docker build --target dashboard -t churn-ui .      # dashboard only
+#   docker compose up --build                          # both, wired together
+#
+# The trained artifacts in model/ are copied into the image, so rebuild the
+# image after retraining (python src/train_model.py). They are never rebuilt
+# at container start — startup stays fast and deterministic.
 # ===========================================================================
 
-FROM python:3.11-slim AS base
+FROM python:3.13-slim AS base
 
-# Prevent Python from writing .pyc files and enable unbuffered output
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
 
-# ---------------------------------------------------------------------------
-# 1. Install system dependencies
-# ---------------------------------------------------------------------------
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        supervisor \
-        curl && \
-    rm -rf /var/lib/apt/lists/*
-
-# ---------------------------------------------------------------------------
-# 2. Install Python dependencies
-# ---------------------------------------------------------------------------
+# Dependencies first so this layer is reused across code-only rebuilds.
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
 
 # ---------------------------------------------------------------------------
-# 3. Copy application code
+# Streamlit dashboard
 # ---------------------------------------------------------------------------
-COPY model/ ./model/
-COPY app/ ./app/
+FROM base AS dashboard
+
 COPY frontend/ ./frontend/
 
-# ---------------------------------------------------------------------------
-# 4. Supervisor config (runs both FastAPI + Streamlit)
-# ---------------------------------------------------------------------------
-RUN mkdir -p /var/log/supervisor
-COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+ENV PORT=8501 \
+    API_URL=http://api:8000
+
+RUN useradd --create-home --uid 1001 appuser && chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 8501
+
+CMD streamlit run frontend/dashboard.py \
+    --server.port=${PORT:-8501} \
+    --server.address=0.0.0.0 \
+    --server.headless=true \
+    --browser.gatherUsageStats=false
+
 
 # ---------------------------------------------------------------------------
-# 5. Expose ports
+# FastAPI prediction service (default target)
 # ---------------------------------------------------------------------------
-EXPOSE 8000 8501
+FROM base AS api
 
-# ---------------------------------------------------------------------------
-# 6. Health check
-# ---------------------------------------------------------------------------
-HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+# app/ + model/ is the whole runtime surface: inference unpickles a complete
+# sklearn Pipeline, so it needs no training code or raw data.
+COPY app/ ./app/
+COPY model/ ./model/
 
-# ---------------------------------------------------------------------------
-# 7. Run
-# ---------------------------------------------------------------------------
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+ENV PORT=8000 \
+    MODEL_DIR=/app/model
+
+RUN useradd --create-home --uid 1001 appuser && chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 8000
+
+# No curl in the slim image, so probe /health with the stdlib.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:%s/health' % os.environ.get('PORT','8000'), timeout=4)" || exit 1
+
+# Shell form so ${PORT} is expanded — Render injects PORT at runtime.
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}

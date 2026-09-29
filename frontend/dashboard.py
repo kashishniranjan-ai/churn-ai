@@ -1,448 +1,454 @@
 """
-Customer Churn Predictor — Streamlit Frontend
-==============================================
-A rich, interactive dashboard that communicates with the FastAPI
-backend. Features customer input forms, real-time predictions,
-risk visualisations, and batch upload capability.
+Customer Repeat-Purchase Dashboard - Streamlit Frontend
+=======================================================
+Talks to the FastAPI service in ``app/main.py``. Nothing is predicted locally:
+every number on screen comes from the API, so the dashboard cannot drift from
+the served model.
+
+Run:  streamlit run frontend/dashboard.py
+Set a non-default backend with:  set API_URL=http://localhost:8000
 """
 
-import json
-import time
+import os
+import io
 
 import pandas as pd
 import requests
 import streamlit as st
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-API_URL = "http://localhost:8000"
+API_URL = os.getenv("API_URL", "http://localhost:8000").rstrip("/")
+TIMEOUT = 15
 
 st.set_page_config(
-    page_title="Churn Predictor — AI Dashboard",
-    page_icon="🔮",
+    page_title="Repeat Purchase Intelligence",
+    page_icon="🛍️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # ---------------------------------------------------------------------------
-# Custom CSS for a premium look
+# Styling
 # ---------------------------------------------------------------------------
-st.markdown("""
+st.markdown(
+    """
 <style>
-    /* ---- Global ---- */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+  .stApp { font-family: 'Inter', sans-serif; }
 
-    .stApp {
-        font-family: 'Inter', sans-serif;
-    }
+  .main-header {
+      background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+      padding: 2.2rem 2rem; border-radius: 16px; margin-bottom: 1.6rem;
+      text-align: center; box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+  }
+  .main-header h1 { color:#fff; font-size:2.2rem; font-weight:700; margin:0 0 .4rem 0; }
+  .main-header p  { color:#a0aec0; font-size:1.02rem; margin:0; }
 
-    /* ---- Header ---- */
-    .main-header {
-        background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
-        padding: 2.5rem 2rem;
-        border-radius: 16px;
-        margin-bottom: 2rem;
-        text-align: center;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-    }
-    .main-header h1 {
-        color: #ffffff;
-        font-size: 2.4rem;
-        font-weight: 700;
-        margin: 0 0 0.5rem 0;
-        letter-spacing: -0.5px;
-    }
-    .main-header p {
-        color: #a0aec0;
-        font-size: 1.05rem;
-        margin: 0;
-    }
+  .result-card { padding: 1.8rem; border-radius: 14px; margin: 1.2rem 0;
+                 box-shadow: 0 4px 24px rgba(0,0,0,0.25); }
+  .result-yes  { background: linear-gradient(135deg,#0d1f0d,#133a13);
+                 border-left: 5px solid #3fb950; }
+  .result-no   { background: linear-gradient(135deg,#2d1117,#4a1520);
+                 border-left: 5px solid #f85149; }
+  .result-title { font-size:1.45rem; font-weight:700; margin-bottom:.4rem; }
 
-    /* ---- Metric cards ---- */
-    .metric-card {
-        background: linear-gradient(135deg, #1a1a2e, #16213e);
-        border: 1px solid rgba(255,255,255,0.08);
-        padding: 1.6rem;
-        border-radius: 14px;
-        text-align: center;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.2);
-        transition: transform 0.2s ease, box-shadow 0.2s ease;
-    }
-    .metric-card:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 8px 30px rgba(0,0,0,0.35);
-    }
-    .metric-value {
-        font-size: 2rem;
-        font-weight: 700;
-        background: linear-gradient(135deg, #667eea, #764ba2);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-    .metric-label {
-        font-size: 0.85rem;
-        color: #a0aec0;
-        margin-top: 0.4rem;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
+  .driver { background: rgba(255,255,255,0.05); border-left: 3px solid #f0883e;
+            padding:.55rem 1rem; border-radius:6px; margin:.35rem 0;
+            font-size:.9rem; color:#e2e8f0; }
 
-    /* ---- Result card ---- */
-    .result-card {
-        padding: 2rem;
-        border-radius: 14px;
-        margin: 1.5rem 0;
-        box-shadow: 0 4px 24px rgba(0,0,0,0.25);
-    }
-    .result-churn {
-        background: linear-gradient(135deg, #2d1117, #4a1520);
-        border-left: 5px solid #f85149;
-    }
-    .result-no-churn {
-        background: linear-gradient(135deg, #0d1f0d, #133a13);
-        border-left: 5px solid #3fb950;
-    }
-    .result-title {
-        font-size: 1.5rem;
-        font-weight: 700;
-        margin-bottom: 0.5rem;
-    }
+  .probability-bar { height:12px; border-radius:6px; background:#2d3748;
+                     overflow:hidden; margin:.5rem 0; }
+  .probability-fill { height:100%; border-radius:6px; }
 
-    /* ---- Risk factors ---- */
-    .risk-factor {
-        background: rgba(255,255,255,0.05);
-        border-left: 3px solid #f0883e;
-        padding: 0.6rem 1rem;
-        border-radius: 6px;
-        margin: 0.4rem 0;
-        font-size: 0.9rem;
-        color: #e2e8f0;
-    }
-
-    /* ---- Sidebar ---- */
-    section[data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #0f0c29, #1a1a2e);
-    }
-
-    /* ---- Progress bar ---- */
-    .probability-bar {
-        height: 12px;
-        border-radius: 6px;
-        background: #2d3748;
-        overflow: hidden;
-        margin: 0.5rem 0;
-    }
-    .probability-fill {
-        height: 100%;
-        border-radius: 6px;
-        transition: width 0.6s ease;
-    }
+  .caveat { background: rgba(240,136,62,0.10); border-left:4px solid #f0883e;
+            padding:.9rem 1.1rem; border-radius:8px; font-size:.9rem; }
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 
 # ---------------------------------------------------------------------------
-# Helper functions
+# API helpers
 # ---------------------------------------------------------------------------
-
-def check_api_health() -> dict | None:
-    """Ping the backend health endpoint."""
+@st.cache_data(ttl=15, show_spinner=False)
+def api_health() -> dict | None:
     try:
-        r = requests.get(f"{API_URL}/health", timeout=5)
-        if r.status_code == 200:
-            return r.json()
-    except requests.ConnectionError:
+        r = requests.get(f"{API_URL}/health", timeout=TIMEOUT)
+        return r.json() if r.status_code == 200 else None
+    except requests.RequestException:
         return None
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def api_metrics() -> dict | None:
+    try:
+        r = requests.get(f"{API_URL}/metrics", timeout=TIMEOUT)
+        return r.json() if r.status_code == 200 else None
+    except requests.RequestException:
+        return None
+
+
+def api_predict(payload: dict) -> dict | None:
+    try:
+        r = requests.post(f"{API_URL}/predict", json=payload, timeout=TIMEOUT)
+    except requests.RequestException:
+        st.error("Cannot reach the API. Start it with: `uvicorn app.main:app --reload`")
+        return None
+    if r.status_code == 200:
+        return r.json()
+    st.error(f"API error {r.status_code}: {r.text[:400]}")
     return None
 
 
-def make_prediction(payload: dict) -> dict | None:
-    """POST customer data and return the prediction response."""
-    try:
-        r = requests.post(f"{API_URL}/predict", json=payload, timeout=10)
-        if r.status_code == 200:
-            return r.json()
-        else:
-            st.error(f"API Error {r.status_code}: {r.text}")
-            return None
-    except requests.ConnectionError:
-        st.error("⚠️ Cannot reach backend API. Is the FastAPI server running?")
-        return None
+def api_predict_batch(records: list[dict]) -> list[dict]:
+    """Send customers in <=500-record chunks (the API's documented limit)."""
+    out: list[dict] = []
+    for i in range(0, len(records), 500):
+        chunk = records[i : i + 500]
+        try:
+            r = requests.post(
+                f"{API_URL}/predict/batch", json={"customers": chunk}, timeout=120
+            )
+        except requests.RequestException:
+            st.error("Cannot reach the API for batch prediction.")
+            return []
+        if r.status_code != 200:
+            st.error(f"API error {r.status_code}: {r.text[:400]}")
+            return []
+        out.extend(r.json()["predictions"])
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Input specification - mirrors app/schemas.py::FEATURE_ORDER
+# ---------------------------------------------------------------------------
+# (key, label, min, max, default, step, group, help)
+FIELDS: list[tuple] = [
+    ("tenure_days", "Tenure (days since first order)", 0, 36500, 184, 1, "Timing",
+     "How long the customer has been buying, measured at the scoring cutoff."),
+    ("recency_days", "Recency (days since last order)", 0, 36500, 72, 1, "Timing",
+     "Lower is more recent. One of the strongest behavioural signals."),
+    ("months_active", "Months with purchase activity", 0, 1200, 2, 1, "Timing",
+     "Count of distinct calendar months containing at least one order."),
+    ("max_gap_days", "Longest gap between orders (days)", 0, 36500, 34, 1, "Timing",
+     "Longest silent stretch inside the customer's own history."),
+    ("frequency", "Number of orders", 1, 100000, 2, 1, "Value & volume",
+     "Distinct orders placed in the history window."),
+    ("monetary", "Total spend (GBP)", 0.0, 100000000.0, 559.55, 10.0, "Value & volume",
+     "Sum of order value across the history window."),
+    ("avg_order_value", "Average order value (GBP)", 0.0, 100000000.0, 285.02, 5.0,
+     "Value & volume", "Total spend divided by number of orders."),
+    ("total_items", "Total items bought", 0, 10000000, 318, 5, "Value & volume",
+     "Units purchased in total."),
+    ("avg_items_per_order", "Items per order", 0.0, 1000000.0, 152.75, 1.0,
+     "Value & volume", "Basket size in units."),
+    ("distinct_products", "Distinct products bought", 0, 1000000, 29, 1, "Value & volume",
+     "Breadth of catalogue the customer has explored."),
+    ("avg_unit_price", "Average unit price paid (GBP)", 0.0, 100000.0, 2.93, 0.1,
+     "Value & volume", "Mean price per unit the customer pays."),
+    ("returns_rate", "Return / cancellation rate", 0.0, 1.0, 0.0, 0.01, "Returns",
+     "Cancelled invoices divided by all invoices. 0 = never returned, 1 = all returns."),
+]
+
+PRESETS: dict[str, dict] = {
+    "Custom": {},
+    "Loyal repeat buyer": {
+        "tenure_days": 260, "recency_days": 8, "months_active": 8, "max_gap_days": 21,
+        "frequency": 12, "monetary": 8200.0, "avg_order_value": 683.0,
+        "total_items": 2400, "avg_items_per_order": 200.0, "distinct_products": 140,
+        "avg_unit_price": 3.4, "returns_rate": 0.03,
+    },
+    "One-off browser": {
+        "tenure_days": 180, "recency_days": 168, "months_active": 1, "max_gap_days": 0,
+        "frequency": 1, "monetary": 95.0, "avg_order_value": 95.0, "total_items": 12,
+        "avg_items_per_order": 12.0, "distinct_products": 3, "avg_unit_price": 7.9,
+        "returns_rate": 0.0,
+    },
+    "Heavy returns / at risk": {
+        "tenure_days": 200, "recency_days": 95, "months_active": 3, "max_gap_days": 90,
+        "frequency": 4, "monetary": 1200.0, "avg_order_value": 300.0,
+        "total_items": 400, "avg_items_per_order": 100.0, "distinct_products": 18,
+        "avg_unit_price": 3.0, "returns_rate": 0.45,
+    },
+}
+
+# Apply the preset by seeding widget state BEFORE the widgets are created.
+chosen_preset = st.session_state.get("preset", "Custom")
+if st.session_state.get("applied_preset") != chosen_preset:
+    for key, value in PRESETS.get(chosen_preset, {}).items():
+        st.session_state[key] = value
+    st.session_state["applied_preset"] = chosen_preset
 
 
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
-
-# ---- Header ----
-st.markdown("""
+st.markdown(
+    """
 <div class="main-header">
-    <h1>🔮 Customer Churn Predictor</h1>
-    <p>AI-powered retention intelligence — predict, understand, and prevent customer churn</p>
+  <h1>🛍️ Repeat Purchase Intelligence</h1>
+  <p>Will this customer order again next quarter? — trained on real
+     UCI Online Retail transactions</p>
 </div>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-# ---- Sidebar ----
+health = api_health()
+
 with st.sidebar:
-    st.markdown("## ⚙️ System Status")
-
-    health = check_api_health()
+    st.markdown("### System status")
     if health:
-        st.success("🟢 API Online")
-        if health.get("training_metrics"):
-            m = health["training_metrics"]
-            st.markdown("### 📊 Model Performance")
-
-            cols = st.columns(2)
-            cols[0].metric("Accuracy", f"{m['accuracy']:.1%}")
-            cols[1].metric("F1 Score", f"{m['f1_score']:.1%}")
-
-            cols2 = st.columns(2)
-            cols2[0].metric("Precision", f"{m['precision']:.1%}")
-            cols2[1].metric("Recall", f"{m['recall']:.1%}")
-
-            st.metric("ROC AUC", f"{m['roc_auc']:.1%}")
+        st.success("API online")
+        st.caption(f"Model: **{health.get('model_type') or 'unknown'}**")
+        st.caption(f"Features: **{health.get('feature_count')}**")
     else:
-        st.error("🔴 API Offline")
-        st.info(
-            "Start the backend:\n\n"
-            "```bash\n"
-            "uvicorn app.main:app --reload\n"
-            "```"
-        )
+        st.error("API offline")
+        st.code(f"uvicorn app.main:app --port {API_URL.rsplit(':', 1)[-1]}", language="bash")
+        st.stop()
 
-    st.markdown("---")
-    st.markdown("### 📖 Quick Guide")
-    st.markdown(
-        "1. Fill in customer details\n"
-        "2. Click **Predict Churn**\n"
-        "3. Review risk analysis\n"
-        "4. Use batch upload for CSV files"
+    metrics = api_metrics()
+    if metrics:
+        st.markdown("### Model performance")
+        test = metrics.get("test_metrics", {})
+        base = metrics.get("baselines", {})
+        st.metric("ROC-AUC", f"{test.get('roc_auc', 0):.3f}")
+        st.metric("Accuracy", f"{test.get('accuracy', 0):.1%}",
+                  delta=f"vs {base.get('majority_class_accuracy', 0):.1%} majority baseline")
+        st.metric("Recall", f"{test.get('recall', 0):.1%}")
+        lift = metrics.get("campaign_metrics", {}).get("top_20pct", {})
+        st.metric("Lift @ top 20%", f"{lift.get('lift_vs_random', 0):.2f}x",
+                  help="Precision when contacting the top 20% of customers, "
+                       "divided by random targeting.")
+        st.caption(f"Decision threshold: **{metrics.get('threshold')}**")
+        st.caption(f"Customers trained on: **{metrics.get('n_customers'):,}**")
+
+tab_single, tab_batch, tab_report, tab_api = st.tabs(
+    ["🔮 Single prediction", "📤 Batch", "📊 Model report", "🔌 API reference"]
+)
+
+# --------------------------------------------------------------- single -----
+with tab_single:
+    st.radio(
+        "Start from a profile",
+        list(PRESETS.keys()),
+        key="preset",
+        horizontal=True,
+        help="Presets just fill the form; everything stays editable.",
     )
 
-    st.markdown("---")
-    st.markdown(
-        "<div style='text-align:center; color:#718096; font-size:0.8rem;'>"
-        "Built with FastAPI + Streamlit<br>v1.0.0</div>",
-        unsafe_allow_html=True,
-    )
+    with st.form("customer_form"):
+        st.markdown("#### Customer history at the scoring date")
+        payload: dict = {}
+        for group in ("Timing", "Value & volume", "Returns"):
+            st.markdown(f"**{group}**")
+            fields = [f for f in FIELDS if f[6] == group]
+            for row in (fields[i : i + 3] for i in range(0, len(fields), 3)):
+                cols = st.columns(len(row))
+                for col, (key, label, lo, hi, default, step, _, help_text) in zip(
+                    cols, row
+                ):
+                    with col:
+                        payload[key] = st.number_input(
+                            label, min_value=lo, max_value=hi, value=default,
+                            step=step, key=key, help=help_text,
+                        )
+        submitted = st.form_submit_button("Predict repeat purchase", type="primary")
 
-# ---- Tabs ----
-tab1, tab2, tab3 = st.tabs(["🎯 Single Prediction", "📦 Batch Upload", "📚 API Docs"])
-
-# ---------------------------------------------------------------------------
-# TAB 1 — Single Prediction
-# ---------------------------------------------------------------------------
-with tab1:
-    st.markdown("### 👤 Customer Profile")
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        st.markdown("**Demographics**")
-        gender = st.selectbox("Gender", ["Male", "Female"], key="gender")
-        senior_citizen = st.selectbox("Senior Citizen", [0, 1], format_func=lambda x: "Yes" if x else "No", key="senior")
-        tenure = st.slider("Tenure (months)", 0, 72, 24, key="tenure")
-
-    with col2:
-        st.markdown("**Services**")
-        contract = st.selectbox("Contract", ["Month-to-month", "One year", "Two year"], key="contract")
-        internet_service = st.selectbox("Internet Service", ["DSL", "Fiber optic", "No"], key="internet")
-        payment_method = st.selectbox(
-            "Payment Method",
-            ["Electronic check", "Mailed check", "Bank transfer", "Credit card"],
-            key="payment",
-        )
-
-    with col3:
-        st.markdown("**Financials & Support**")
-        monthly_charges = st.number_input("Monthly Charges ($)", 0.0, 200.0, 65.0, step=5.0, key="monthly")
-        total_charges = st.number_input("Total Charges ($)", 0.0, 20000.0, 2500.0, step=100.0, key="total")
-        num_support_tickets = st.slider("Support Tickets", 0, 10, 1, key="tickets")
-        num_referrals = st.slider("Referrals", 0, 12, 0, key="referrals")
-
-    st.markdown("---")
-
-    predict_btn = st.button("🚀 Predict Churn", type="primary", use_container_width=True)
-
-    if predict_btn:
-        payload = {
-            "gender": gender,
-            "senior_citizen": senior_citizen,
-            "tenure": tenure,
-            "contract": contract,
-            "internet_service": internet_service,
-            "payment_method": payment_method,
-            "monthly_charges": monthly_charges,
-            "total_charges": total_charges,
-            "num_support_tickets": num_support_tickets,
-            "num_referrals": num_referrals,
-        }
-
-        with st.spinner("Analyzing customer profile..."):
-            time.sleep(0.3)  # tiny delay for visual feedback
-            result = make_prediction(payload)
-
+    if submitted:
+        result = api_predict(payload)
         if result:
-            is_churn = result["prediction"] == "Churn"
-            card_class = "result-churn" if is_churn else "result-no-churn"
-            emoji = "⚠️" if is_churn else "✅"
-            prob = result["churn_probability"]
-            bar_color = (
-                f"hsl({int((1 - prob) * 120)}, 80%, 50%)"  # red→green
+            repeat = result["will_repeat"]
+            prob = result["repeat_probability"]
+            colour = "#3fb950" if repeat else "#f85149"
+            st.markdown(
+                f"""<div class="result-card {'result-yes' if repeat else 'result-no'}">
+  <div class="result-title">{'🔁 Will buy again' if repeat else '🚪 Unlikely to return'}</div>
+  <div>Next-purchase probability
+       <strong style="font-size:1.3rem">{prob:.1%}</strong>
+       &nbsp;·&nbsp; tier: {result['engagement_tier']}
+       &nbsp;·&nbsp; threshold: {result['threshold']}</div>
+  <div class="probability-bar">
+    <div class="probability-fill" style="width:{prob * 100:.1f}%;background:{colour}"></div>
+  </div>
+</div>""",
+                unsafe_allow_html=True,
             )
-
-            # Result card
-            st.markdown(f"""
-            <div class="result-card {card_class}">
-                <div class="result-title">{emoji} Prediction: {result['prediction']}</div>
-                <p style="color:#a0aec0; margin:0;">
-                    Risk Level: <strong>{result['risk_level']}</strong> &nbsp;|&nbsp;
-                    Confidence: <strong>{result['confidence']:.1%}</strong>
-                </p>
-                <div style="margin-top:1rem;">
-                    <span style="color:#e2e8f0; font-size:0.9rem;">
-                        Churn Probability: <strong>{prob:.1%}</strong>
-                    </span>
-                    <div class="probability-bar">
-                        <div class="probability-fill"
-                             style="width:{prob*100}%; background:{bar_color};"></div>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            # Risk factors
-            if result.get("risk_factors"):
-                st.markdown("#### 🔍 Risk Factors")
-                for factor in result["risk_factors"]:
-                    st.markdown(f'<div class="risk-factor">⚡ {factor}</div>', unsafe_allow_html=True)
-            else:
-                st.success("No significant risk factors identified — customer appears stable.")
-
-            # Raw JSON expander
-            with st.expander("📋 Full API Response (JSON)"):
+            st.markdown("#### Why the model decided this")
+            st.caption(
+                "Ranked by the model's own feature importances; the direction "
+                "comes from its fitted coefficients, compared with the training "
+                "average for each feature."
+            )
+            for driver in result["key_drivers"]:
+                st.markdown(
+                    f'<div class="driver">{driver}</div>', unsafe_allow_html=True
+                )
+            with st.expander("Raw response"):
                 st.json(result)
 
-
-# ---------------------------------------------------------------------------
-# TAB 2 — Batch Upload
-# ---------------------------------------------------------------------------
-with tab2:
-    st.markdown("### 📤 Upload a CSV for Batch Predictions")
+# ---------------------------------------------------------------- batch -----
+with tab_batch:
     st.markdown(
-        "Upload a CSV with these columns: `gender`, `senior_citizen`, `tenure`, "
-        "`contract`, `internet_service`, `payment_method`, `monthly_charges`, "
-        "`total_charges`, `num_support_tickets`, `num_referrals`"
+        f"Upload a CSV with exactly these columns: `{', '.join(f[0] for f in FIELDS)}`."
+    )
+    upload = st.file_uploader("Customer CSV", type=["csv"])
+    if upload is not None:
+        try:
+            frame = pd.read_csv(upload)
+        except Exception as exc:  # noqa: BLE001 - surface any parse error verbatim
+            st.error(f"Could not parse CSV: {exc}")
+            frame = None
+        if frame is not None:
+            missing = [f[0] for f in FIELDS if f[0] not in frame.columns]
+            if missing:
+                st.error(f"Missing required columns: {', '.join(missing)}")
+            else:
+                st.dataframe(frame[list(dict.fromkeys([f[0] for f in FIELDS]))].head(10))
+                st.caption(f"{len(frame):,} rows ready.")
+                if st.button("Score this file", type="primary"):
+                    recs = frame[[f[0] for f in FIELDS]].to_dict("records")
+                    preds = api_predict_batch(recs)
+                    if preds:
+                        out = pd.DataFrame(
+                            {
+                                "repeat_probability": [p["repeat_probability"] for p in preds],
+                                "prediction": [p["prediction"] for p in preds],
+                                "engagement_tier": [p["engagement_tier"] for p in preds],
+                            }
+                        )
+                        merged = pd.concat([frame.reset_index(drop=True), out], axis=1)
+                        merged = merged.sort_values(
+                            "repeat_probability", ascending=False
+                        ).reset_index(drop=True)
+                        st.success(
+                            f"Scored {len(merged):,} customers. Ranked by "
+                            "likelihood to buy again — contact from the top down."
+                        )
+                        st.dataframe(merged.head(200))
+                        st.download_button(
+                            "Download ranked CSV",
+                            merged.to_csv(index=False).encode(),
+                            file_name="scored_customers.csv",
+                            mime="text/csv",
+                        )
+
+# --------------------------------------------------------------- report -----
+@st.cache_data(ttl=60, show_spinner=False)
+def api_features() -> dict | None:
+    try:
+        r = requests.get(f"{API_URL}/features", timeout=TIMEOUT)
+        return r.json() if r.status_code == 200 else None
+    except requests.RequestException:
+        return None
+
+
+with tab_report:
+    if not metrics:
+        st.info("Model report unavailable — the API could not read training_metrics.json.")
+    else:
+        st.markdown("#### What the model predicts")
+        st.write(metrics.get("target_definition", ""))
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Customers", f"{metrics.get('n_customers', 0):,}")
+        c2.metric("Repeat rate in data", f"{metrics.get('positive_rate', 0):.1%}")
+        c3.metric("Model", metrics.get("model_type", ""))
+        c4.metric("ROC-AUC (test)", f"{metrics['test_metrics']['roc_auc']:.3f}")
+
+        st.markdown("#### Model selection — 5-fold CV ROC-AUC on training data")
+        cv = metrics.get("model_selection_cv_roc_auc", {})
+        chosen = metrics.get("model_type")
+        st.bar_chart(pd.Series(cv).rename_axis("candidate").sort_values())
+        st.caption(
+            f"Highest CV ROC-AUC was selected: **{chosen}**. The decision "
+            "threshold was then frozen on out-of-fold training predictions only "
+            "— the test set was used once, for the numbers below."
+        )
+
+        st.markdown("#### Held-out test set vs baselines")
+        test, base = metrics["test_metrics"], metrics.get("baselines", {})
+        comparison = pd.DataFrame(
+            [
+                {"metric": "Accuracy", "model": test["accuracy"],
+                 "trivial_baseline": base.get("majority_class_accuracy")},
+                {"metric": "F1 (will repeat)", "model": test["f1_score"],
+                 "trivial_baseline": base.get("always_predict_repeat_f1")},
+                {"metric": "ROC-AUC", "model": test["roc_auc"], "trivial_baseline": 0.5},
+            ]
+        )
+        st.dataframe(comparison, hide_index=True)
+        st.markdown(
+            '<div class="caveat"><strong>Read this honestly.</strong> Because '
+            f"{metrics.get('positive_rate', 0):.0%} of customers do repeat, "
+            '"predict repeat for everyone" already scores F1 ≈ '
+            f"{base.get('always_predict_repeat_f1', 0):.2f}. F1 is therefore a "
+            "weak headline here. The lift table below is the decision-relevant "
+            "measure: it shows how much better targeted outreach is than random.</div>",
+            unsafe_allow_html=True,
+        )
+
+        st.markdown("#### Campaign targeting on the held-out test set")
+        campaigns = metrics.get("campaign_metrics", {})
+        st.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "contact top": label.replace("top_", "").replace("pct", "%"),
+                        "customers": c["customers_contacted"],
+                        "precision": c["precision_at_top"],
+                        "random": c["random_targeting_precision"],
+                        "lift": c["lift_vs_random"],
+                        "% of repeaters reached": c["repeaters_captured_pct"],
+                    }
+                    for label, c in campaigns.items()
+                ]
+            ),
+            hide_index=True,
+        )
+
+        feats = api_features()
+        if feats:
+            st.markdown("#### What actually moves the model")
+            effects = feats.get("feature_effects", {})
+            order = feats.get("feature_order", list(effects))
+            st.bar_chart(
+                pd.Series({k: effects.get(k, 0.0) for k in order})
+                .rename_axis("feature")
+                .sort_values()
+            )
+            st.caption(
+                "Signed effect: right = increases the chance of a repeat purchase, "
+                "left = decreases it. Method: "
+                f"`{feats.get('effect_method', 'n/a')}`. Magnitude-only "
+                "importances are available from `GET /features`."
+            )
+
+# ------------------------------------------------------------------ api -----
+with tab_api:
+    st.markdown(
+        f"""
+| Method | Endpoint | Purpose |
+|---|---|---|
+| GET | `/health` | Liveness, loaded model, key metrics |
+| GET | `/metrics` | Full training report incl. baselines and lift |
+| GET | `/features` | Importances, signed effects, training distributions |
+| POST | `/predict` | One customer → repeat probability + drivers |
+| POST | `/predict/batch` | Up to 500 customers, vectorised |
+| GET | `/docs` | Interactive OpenAPI UI |
+
+**Example request**
+
+```bash
+curl -X POST {API_URL}/predict \\
+  -H "Content-Type: application/json" \\
+  -d '{{"tenure_days": 250, "recency_days": 40, "frequency": 6,
+        "monetary": 1850.0, "avg_order_value": 308.33, "total_items": 720,
+        "avg_items_per_order": 120.0, "distinct_products": 45,
+        "avg_unit_price": 2.9, "months_active": 5, "max_gap_days": 62,
+        "returns_rate": 0.05}}'
+```
+
+Interactive docs: <{API_URL}/docs>
+        """
     )
 
-    uploaded = st.file_uploader("Choose CSV file", type=["csv"], key="batch_csv")
 
-    if uploaded:
-        df = pd.read_csv(uploaded)
-        st.dataframe(df.head(), use_container_width=True)
-
-        if st.button("🚀 Run Batch Prediction", type="primary"):
-            records = df.to_dict(orient="records")
-            try:
-                r = requests.post(
-                    f"{API_URL}/predict/batch",
-                    json={"customers": records},
-                    timeout=60,
-                )
-                if r.status_code == 200:
-                    batch_result = r.json()
-                    results_df = pd.DataFrame([
-                        {
-                            "Prediction": p["prediction"],
-                            "Churn Prob": f"{p['churn_probability']:.1%}",
-                            "Risk Level": p["risk_level"],
-                            "Confidence": f"{p['confidence']:.1%}",
-                        }
-                        for p in batch_result["predictions"]
-                    ])
-                    combined = pd.concat([df.reset_index(drop=True), results_df], axis=1)
-                    st.dataframe(combined, use_container_width=True)
-
-                    # Summary metrics
-                    churn_count = sum(1 for p in batch_result["predictions"] if p["prediction"] == "Churn")
-                    total = batch_result["count"]
-
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("Total Customers", total)
-                    c2.metric("Predicted Churn", churn_count)
-                    c3.metric("Churn Rate", f"{churn_count/total:.1%}")
-
-                    # Download
-                    csv_out = combined.to_csv(index=False)
-                    st.download_button(
-                        "📥 Download Results CSV",
-                        csv_out,
-                        "churn_predictions.csv",
-                        "text/csv",
-                    )
-                else:
-                    st.error(f"API Error: {r.text}")
-            except requests.ConnectionError:
-                st.error("⚠️ Cannot reach the API. Is the backend running?")
-
-
-# ---------------------------------------------------------------------------
-# TAB 3 — API Documentation
-# ---------------------------------------------------------------------------
-with tab3:
-    st.markdown("### 📚 API Reference")
-    st.markdown(
-        "The FastAPI backend auto-generates interactive docs. "
-        "Visit the links below while the server is running:"
-    )
-    st.markdown(f"- **Swagger UI**: [{API_URL}/docs]({API_URL}/docs)")
-    st.markdown(f"- **ReDoc**: [{API_URL}/redoc]({API_URL}/redoc)")
-
-    st.markdown("---")
-    st.markdown("### 🔗 Endpoints")
-
-    with st.expander("GET /health — Health Check"):
-        st.code(
-            'curl -X GET "http://localhost:8000/health"',
-            language="bash",
-        )
-        st.json({
-            "status": "ok",
-            "model_loaded": True,
-            "version": "1.0.0",
-            "timestamp": "2026-01-13T10:00:00Z",
-        })
-
-    with st.expander("POST /predict — Single Prediction"):
-        st.code(
-            """curl -X POST "http://localhost:8000/predict" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "gender": "Male",
-    "senior_citizen": 0,
-    "tenure": 5,
-    "contract": "Month-to-month",
-    "internet_service": "Fiber optic",
-    "payment_method": "Electronic check",
-    "monthly_charges": 95.50,
-    "total_charges": 480.00,
-    "num_support_tickets": 6,
-    "num_referrals": 0
-  }'""",
-            language="bash",
-        )
-
-    with st.expander("POST /predict/batch — Batch Prediction"):
-        st.code(
-            """curl -X POST "http://localhost:8000/predict/batch" \\
-  -H "Content-Type: application/json" \\
-  -d '{"customers": [{ ... }, { ... }]}'""",
-            language="bash",
-        )
-
-    with st.expander("GET /model/info — Model Metadata"):
-        st.code(
-            'curl -X GET "http://localhost:8000/model/info"',
-            language="bash",
-        )

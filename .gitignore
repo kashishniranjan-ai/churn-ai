@@ -15,3 +15,11 @@ build/
 *.log
 .DS_Store
 Thumbs.db
+data/raw/
+data/processed/
+
+# scratch / throwaway verification files
+_*.txt
+_*.tmp
+*.bak
+

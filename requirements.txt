@@ -1,21 +1,34 @@
-# =============================================================================
-# Python Dependencies — Customer Churn Predictor
-# =============================================================================
-# Core ML
-scikit-learn>=1.3.0
-pandas>=2.0.0
-numpy>=1.24.0
-joblib>=1.3.0
-
-# Backend API
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
+# ---------------------------------------------------------------------------
+# Runtime - API server + inference
+# Lower bounds are the versions this project was last verified against; pip may
+# install newer. Model artifacts are saved with protocol 5, so inference needs
+# Python >= 3.8 and scikit-learn >= 1.3.
+# ---------------------------------------------------------------------------
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
 pydantic>=2.5.0
+# Pinned: model/customer_prediction_pipeline.joblib is a pickle, and scikit-learn
+# refuses to load artifacts written by a different minor version. Retrain and
+# bump these together if you change them.
+scikit-learn==1.8.0
+joblib==1.5.3
+pandas>=2.0.0
+numpy>=1.26.0
 
-# Frontend
-streamlit>=1.28.0
+# ---------------------------------------------------------------------------
+# Data pipeline - download / clean / build SQLite / train
+# ---------------------------------------------------------------------------
 requests>=2.31.0
+urllib3>=2.0.0
+matplotlib>=3.8.0
 
-# Testing
+# ---------------------------------------------------------------------------
+# Frontend dashboard
+# ---------------------------------------------------------------------------
+streamlit>=1.30.0
+
+# ---------------------------------------------------------------------------
+# Tests (fastapi.testclient needs httpx)
+# ---------------------------------------------------------------------------
 pytest>=7.4.0
-httpx>=0.25.0
+httpx>=0.26.0

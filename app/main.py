@@ -1,332 +1,292 @@
 """
-Customer Churn Predictor — FastAPI Backend
-==========================================
-Production-grade REST API serving churn predictions.
-Loads serialized model & preprocessor at startup,
-validates inputs via Pydantic, returns structured JSON.
+Customer Repeat-Purchase Prediction API
+=======================================
+FastAPI service serving the model trained by ``src/train_model.py`` on the real
+UCI Online Retail data.
+
+Design notes
+------------
+* One artifact, one truth: a single scikit-learn ``Pipeline`` (scaler +
+  classifier) is loaded, so preprocessing can never drift from training.
+* Feature order is validated at startup against ``feature_metadata.json``.
+  A schema/model mismatch fails loudly at boot instead of silently
+  mis-predicting (this was a real bug in the previous version of this file).
+* Risk-factor explanations come from the model's own stored importances and
+  signed effects - no hard-coded feature lists.
+* Batch inference is vectorised (one ``predict_proba`` call for the batch).
 """
 
+from __future__ import annotations
+
 import json
-import pathlib
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Optional
+from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, field_validator
 
-# ---------------------------------------------------------------------------
-# Paths — resolve model directory robustly for both direct run and test import
-# ---------------------------------------------------------------------------
-import os
+from app.schemas import (
+    FEATURE_ORDER,
+    BatchInput,
+    BatchResponse,
+    CustomerInput,
+    HealthResponse,
+    PredictionResponse,
+)
 
-_app_file_dir = pathlib.Path(__file__).resolve().parent          # …/app/
-_project_root_from_file = _app_file_dir.parent                   # …/churn-ai-app/
-_project_root_from_cwd = pathlib.Path(os.getcwd()).resolve()     # cwd
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Overridable so containers / managed platforms can mount artifacts elsewhere.
+MODEL_DIR = Path(os.getenv("MODEL_DIR", PROJECT_ROOT / "model"))
+PIPELINE_PATH = MODEL_DIR / "customer_prediction_pipeline.joblib"
+METADATA_PATH = MODEL_DIR / "feature_metadata.json"
+METRICS_PATH = MODEL_DIR / "training_metrics.json"
 
-# Prefer the file-based root, but fall back to cwd if model/ doesn't exist there
-if (_project_root_from_file / "model" / "churn_model.pkl").exists():
-    BASE_DIR = _project_root_from_file
-else:
-    BASE_DIR = _project_root_from_cwd
+VERSION = "2.0.0"
 
-MODEL_DIR = BASE_DIR / "model"
+# Shared service state, populated by the lifespan handler at startup.
+STATE: dict = {
+    "pipeline": None,
+    "metadata": {},
+    "metrics": {},
+    "feature_order": list(FEATURE_ORDER),
+    "threshold": 0.5,
+}
 
-# ---------------------------------------------------------------------------
-# Global model state (loaded once at startup)
-# ---------------------------------------------------------------------------
-_model = None
-_preprocessor = None
-_feature_names = None
-_metrics = None
+
+def _load_artifacts() -> None:
+    """Load pipeline + metadata and fail loudly if anything is inconsistent."""
+    if not PIPELINE_PATH.exists():
+        raise RuntimeError(
+            f"Missing model artifact: {PIPELINE_PATH}\n"
+            "Run `python src/train_model.py` before starting the API."
+        )
+
+    STATE["pipeline"] = joblib.load(PIPELINE_PATH)
+    STATE["metadata"] = (
+        json.loads(METADATA_PATH.read_text()) if METADATA_PATH.exists() else {}
+    )
+    STATE["metrics"] = (
+        json.loads(METRICS_PATH.read_text()) if METRICS_PATH.exists() else {}
+    )
+
+    stored_order = STATE["metadata"].get("feature_order")
+    if stored_order and tuple(stored_order) != tuple(FEATURE_ORDER):
+        raise RuntimeError(
+            "Feature order mismatch between app/schemas.py and the trained "
+            "model - the API would feed features in the wrong order.\n"
+            f"  schema: {tuple(FEATURE_ORDER)}\n  model : {tuple(stored_order)}\n"
+            "Fix app/schemas.py::FEATURE_ORDER or retrain."
+        )
+    STATE["feature_order"] = list(stored_order or FEATURE_ORDER)
+    STATE["threshold"] = float(STATE["metadata"].get("threshold", 0.5))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load model artifacts once when the server starts."""
-    global _model, _preprocessor, _feature_names, _metrics
-
-    model_path = MODEL_DIR / "churn_model.pkl"
-    preprocessor_path = MODEL_DIR / "preprocessor.pkl"
-    features_path = MODEL_DIR / "feature_names.pkl"
-    metrics_path = MODEL_DIR / "training_metrics.json"
-
-    for p in [model_path, preprocessor_path, features_path]:
-        if not p.exists():
-            raise RuntimeError(
-                f"Missing artifact: {p}. Run `python model/train.py` first."
-            )
-
-    _model = joblib.load(model_path)
-    _preprocessor = joblib.load(preprocessor_path)
-    _feature_names = joblib.load(features_path)
-
-    if metrics_path.exists():
-        with open(metrics_path) as f:
-            _metrics = json.load(f)
-
-    print(f"Model loaded  |  Features: {len(_feature_names)}  |  Ready.")
+    _load_artifacts()
+    print(
+        f"[startup] loaded {STATE['metrics'].get('model_type', 'unknown')} "
+        f"threshold={STATE['threshold']}"
+    )
     yield
-    print("Shutting down.")
 
 
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
 app = FastAPI(
-    title="Customer Churn Predictor API",
+    title="Customer Repeat-Purchase Prediction API",
+    version=VERSION,
     description=(
-        "Production-grade REST API for predicting customer churn. "
-        "Send customer attributes via POST /predict and receive an "
-        "instant churn probability with risk classification."
+        "Predicts whether an e-commerce customer will place another order in "
+        "the next quarter, from their behavioural history. Trained on the real "
+        "UCI Online Retail dataset."
     ),
-    version="1.0.0",
     lifespan=lifespan,
 )
 
+# CORS: '*' cannot legally be combined with credentials, so origins are explicit.
+_raw_origins = os.getenv(
+    "ALLOWED_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501"
+)
+ALLOWED_ORIGINS = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+ALLOW_CREDENTIALS = "*" not in ALLOWED_ORIGINS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=ALLOW_CREDENTIALS,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-
-# ---------------------------------------------------------------------------
-# Pydantic Schemas
-# ---------------------------------------------------------------------------
-class CustomerInput(BaseModel):
-    """Schema for a single customer prediction request."""
-
-    gender: str = Field(
-        ..., description="Customer gender", examples=["Male", "Female"]
-    )
-    senior_citizen: int = Field(
-        ..., ge=0, le=1, description="1 if senior citizen, else 0", examples=[0]
-    )
-    tenure: int = Field(
-        ..., ge=0, le=100, description="Months with the company", examples=[24]
-    )
-    contract: str = Field(
-        ...,
-        description="Contract type",
-        examples=["Month-to-month", "One year", "Two year"],
-    )
-    internet_service: str = Field(
-        ...,
-        description="Internet service type",
-        examples=["DSL", "Fiber optic", "No"],
-    )
-    payment_method: str = Field(
-        ...,
-        description="Payment method",
-        examples=["Electronic check", "Mailed check", "Bank transfer", "Credit card"],
-    )
-    monthly_charges: float = Field(
-        ..., ge=0, description="Monthly charges in USD", examples=[79.85]
-    )
-    total_charges: float = Field(
-        ..., ge=0, description="Total charges to date in USD", examples=[3320.75]
-    )
-    num_support_tickets: int = Field(
-        ..., ge=0, description="Number of support tickets filed", examples=[2]
-    )
-    num_referrals: int = Field(
-        ..., ge=0, description="Number of referrals made", examples=[1]
-    )
-
-    @field_validator("gender")
-    @classmethod
-    def validate_gender(cls, v: str) -> str:
-        allowed = {"Male", "Female"}
-        if v not in allowed:
-            raise ValueError(f"gender must be one of {allowed}")
-        return v
-
-    @field_validator("contract")
-    @classmethod
-    def validate_contract(cls, v: str) -> str:
-        allowed = {"Month-to-month", "One year", "Two year"}
-        if v not in allowed:
-            raise ValueError(f"contract must be one of {allowed}")
-        return v
-
-    @field_validator("internet_service")
-    @classmethod
-    def validate_internet(cls, v: str) -> str:
-        allowed = {"DSL", "Fiber optic", "No"}
-        if v not in allowed:
-            raise ValueError(f"internet_service must be one of {allowed}")
-        return v
-
-    @field_validator("payment_method")
-    @classmethod
-    def validate_payment(cls, v: str) -> str:
-        allowed = {"Electronic check", "Mailed check", "Bank transfer", "Credit card"}
-        if v not in allowed:
-            raise ValueError(f"payment_method must be one of {allowed}")
-        return v
+LABELS = {
+    "tenure_days": "Customer tenure",
+    "recency_days": "Days since last purchase",
+    "frequency": "Number of orders",
+    "monetary": "Total spend",
+    "avg_order_value": "Average order value",
+    "total_items": "Total items bought",
+    "avg_items_per_order": "Items per order",
+    "distinct_products": "Distinct products bought",
+    "avg_unit_price": "Average unit price paid",
+    "months_active": "Months with purchase activity",
+    "max_gap_days": "Longest purchase gap",
+    "returns_rate": "Return / cancellation rate",
+}
 
 
-class PredictionResponse(BaseModel):
-    """Prediction response schema."""
-
-    customer_data: dict
-    prediction: str
-    churn_probability: float
-    confidence: float
-    risk_level: str
-    risk_factors: list[str]
-    timestamp: str
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-class HealthResponse(BaseModel):
-    """Health-check response schema."""
-
-    status: str
-    model_loaded: bool
-    version: str
-    timestamp: str
-    training_metrics: Optional[dict] = None
-
-
-class BatchInput(BaseModel):
-    """Accept a list of customers for batch prediction."""
-
-    customers: list[CustomerInput]
+def _tier(p: float) -> str:
+    if p >= 0.80:
+        return "Highly Likely"
+    if p >= 0.60:
+        return "Likely"
+    if p >= 0.40:
+        return "Uncertain"
+    if p >= 0.20:
+        return "Unlikely"
+    return "Very Unlikely"
 
 
-class BatchResponse(BaseModel):
-    """Batch prediction response."""
+def _drivers(record: dict, top_n: int = 3) -> list[str]:
+    """
+    Explain one prediction using ONLY artifacts the model produced:
+    stored importances (magnitude), stored signed effects (direction) and the
+    training distribution (to say what 'typical' means).
+    """
+    meta = STATE["metadata"]
+    stats = meta.get("feature_stats", {})
+    imps = meta.get("feature_importances", {})
+    effects = meta.get("feature_effects", {})
+    if not stats or not imps:
+        return ["Explanations unavailable - feature_metadata.json is missing."]
 
-    count: int
-    predictions: list[PredictionResponse]
+    ranked = []
+    for feat in STATE["feature_order"]:
+        s = stats.get(feat)
+        if not s:
+            continue
+        std = s.get("std") or 1.0
+        z = (float(record[feat]) - s.get("mean", 0.0)) / std
+        weight = abs(imps.get(feat, 0.0) * z)
+        # effect * z  > 0  => this customer's value pushes toward 'will repeat'
+        push = effects.get(feat, 0.0) * z
+        ranked.append((weight, feat, push, z, s))
 
-
-# ---------------------------------------------------------------------------
-# Helper: risk factor analysis
-# ---------------------------------------------------------------------------
-
-def _analyze_risk_factors(data: CustomerInput) -> list[str]:
-    """Return human-readable risk factors for interpretability."""
-    factors = []
-    if data.contract == "Month-to-month":
-        factors.append("Month-to-month contract (high flexibility = high churn risk)")
-    if data.tenure < 12:
-        factors.append(f"Short tenure ({data.tenure} months — customers churn early)")
-    if data.monthly_charges > 80:
-        factors.append(f"High monthly charges (${data.monthly_charges:.2f})")
-    if data.internet_service == "Fiber optic":
-        factors.append("Fiber optic service (correlated with higher churn)")
-    if data.payment_method == "Electronic check":
-        factors.append("Electronic check payment (less sticky payment method)")
-    if data.num_support_tickets > 4:
-        factors.append(f"High support tickets ({data.num_support_tickets} — signals dissatisfaction)")
-    if data.senior_citizen == 1:
-        factors.append("Senior citizen (slightly elevated churn demographic)")
-    if data.num_referrals == 0 and data.tenure > 6:
-        factors.append("Zero referrals despite tenure (low engagement signal)")
-    return factors
-
-
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
-
-@app.get("/", tags=["Root"])
-async def root():
-    """API root — welcome message."""
-    return {
-        "message": "🚀 Customer Churn Predictor API",
-        "docs": "/docs",
-        "health": "/health",
-        "predict": "POST /predict",
-    }
+    ranked.sort(key=lambda t: t[0], reverse=True)
+    lines = []
+    for _, feat, push, z, s in ranked[:top_n]:
+        # Compare against the SAME statistic the ranking uses (the training
+        # mean), otherwise the sentence can contradict its own numbers.
+        value, typical = float(record[feat]), s.get("mean", 0.0)
+        spread = "higher than" if z > 0 else "lower than" if z < 0 else "in line with"
+        effect = "raises" if push > 0 else "lowers" if push < 0 else "does not shift"
+        lines.append(
+            f"{LABELS.get(feat, feat)} is {spread} the training average "
+            f"({value:,.2f} vs {typical:,.2f}), which {effect} the "
+            f"repeat-purchase estimate."
+        )
+    return lines
 
 
-@app.get("/health", response_model=HealthResponse, tags=["Health"])
-async def health_check():
-    """Health check endpoint — used by cloud services to verify liveness."""
+def _predict_records(records: list[dict]) -> list[dict]:
+    """Vectorised inference for 1..N customer dicts -> response payloads."""
+    pipeline = STATE["pipeline"]
+    threshold = STATE["threshold"]
+    if pipeline is None:  # pragma: no cover - lifespan loads before requests
+        raise HTTPException(status_code=503, detail="Model not loaded yet.")
+
+    frame = pd.DataFrame(records)[STATE["feature_order"]]
+    try:
+        proba = np.asarray(pipeline.predict_proba(frame)[:, 1], dtype=float)
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {exc}")
+
+    out = []
+    for record, p in zip(records, proba):
+        p = float(np.clip(p, 0.0, 1.0))
+        will_repeat = bool(p >= threshold)
+        out.append(
+            PredictionResponse(
+                customer_features=record,
+                prediction="Will Repeat" if will_repeat else "Will Not Repeat",
+                will_repeat=will_repeat,
+                repeat_probability=round(p, 4),
+                confidence=round(p if will_repeat else 1.0 - p, 4),
+                engagement_tier=_tier(p),
+                key_drivers=_drivers(record),
+                threshold=threshold,
+                timestamp=_now_iso(),
+            )
+        )
+    return out
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    return {"service": "Customer Repeat-Purchase Prediction API", "docs": "/docs"}
+
+
+@app.get("/health", response_model=HealthResponse)
+def health():
+    """Liveness + what is actually loaded (useful right after a deploy)."""
+    metrics = STATE["metrics"]
     return HealthResponse(
-        status="ok",
-        model_loaded=_model is not None,
-        version="1.0.0",
-        timestamp=datetime.now(timezone.utc).isoformat(),
-        training_metrics=_metrics,
+        status="healthy" if STATE["pipeline"] is not None else "degraded",
+        model_loaded=STATE["pipeline"] is not None,
+        version=VERSION,
+        model_type=metrics.get("model_type"),
+        feature_count=len(STATE["feature_order"]),
+        training_metrics={
+            k: metrics.get(k)
+            for k in ("roc_auc_mean", "test_metrics", "campaign_metrics", "threshold")
+        }
+        if metrics
+        else None,
+        timestamp=_now_iso(),
     )
 
 
-@app.post("/predict", response_model=PredictionResponse, tags=["Prediction"])
-async def predict(customer: CustomerInput):
+@app.get("/metrics")
+def metrics():
+    """Full training report: every candidate's CV score, test metrics, baselines."""
+    if not STATE["metrics"]:
+        raise HTTPException(status_code=404, detail="training_metrics.json not found")
+    return STATE["metrics"]
+
+
+@app.get("/features")
+def features():
+    """Stored feature importances, signed effects and training distributions.
+
+    Exposed so the dashboard explains predictions from model artifacts rather
+    than re-deriving (and possibly contradicting) them client-side.
     """
-    Predict customer churn.
-
-    Accepts customer attributes, preprocesses them with the saved
-    ColumnTransformer, runs inference, and returns a structured result
-    with probability, risk level, and interpretable risk factors.
-    """
-    if _model is None or _preprocessor is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-
-    # Build DataFrame with correct column order
-    input_df = pd.DataFrame([customer.model_dump()])[_feature_names]
-
-    # Preprocess & predict
-    X_transformed = _preprocessor.transform(input_df)
-    proba = float(_model.predict_proba(X_transformed)[0][1])
-    prediction = "Churn" if proba >= 0.5 else "No Churn"
-    confidence = proba if prediction == "Churn" else 1 - proba
-
-    # Risk classification
-    if proba >= 0.75:
-        risk_level = "🔴 Critical"
-    elif proba >= 0.50:
-        risk_level = "🟠 High"
-    elif proba >= 0.30:
-        risk_level = "🟡 Medium"
-    else:
-        risk_level = "🟢 Low"
-
-    risk_factors = _analyze_risk_factors(customer)
-
-    return PredictionResponse(
-        customer_data=customer.model_dump(),
-        prediction=prediction,
-        churn_probability=round(proba, 4),
-        confidence=round(confidence, 4),
-        risk_level=risk_level,
-        risk_factors=risk_factors,
-        timestamp=datetime.now(timezone.utc).isoformat(),
-    )
+    if not STATE["metadata"]:
+        raise HTTPException(status_code=404, detail="feature_metadata.json not found")
+    return STATE["metadata"]
 
 
-@app.post("/predict/batch", response_model=BatchResponse, tags=["Prediction"])
-async def predict_batch(batch: BatchInput):
-    """Batch prediction endpoint — accepts up to 100 customers at once."""
-    if len(batch.customers) > 100:
-        raise HTTPException(status_code=400, detail="Maximum batch size is 100")
-
-    results = []
-    for customer in batch.customers:
-        result = await predict(customer)
-        results.append(result)
-
-    return BatchResponse(count=len(results), predictions=results)
+@app.post("/predict", response_model=PredictionResponse)
+def predict(customer: CustomerInput):
+    """Predict whether ONE customer places another order in the next quarter."""
+    try:
+        return _predict_records([customer.model_dump()])[0]
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover
+        raise HTTPException(status_code=500, detail=f"Prediction failed: {exc}")
 
 
-@app.get("/model/info", tags=["Model"])
-async def model_info():
-    """Return model metadata and training metrics."""
-    return {
-        "model_type": "RandomForestClassifier",
-        "n_estimators": 200,
-        "max_depth": 12,
-        "features": _feature_names,
-        "feature_count": len(_feature_names) if _feature_names else 0,
-        "training_metrics": _metrics,
-    }
+@app.post("/predict/batch", response_model=BatchResponse)
+def predict_batch(payload: BatchInput):
+    """Predict for up to 500 customers in a single vectorised pass."""
+    preds = _predict_records([c.model_dump() for c in payload.customers])
+    return BatchResponse(count=len(preds), predictions=preds)
+

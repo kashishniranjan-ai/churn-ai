@@ -1,0 +1,139 @@
+{
+  "feature_order": [
+    "tenure_days",
+    "recency_days",
+    "frequency",
+    "monetary",
+    "avg_order_value",
+    "total_items",
+    "avg_items_per_order",
+    "distinct_products",
+    "avg_unit_price",
+    "months_active",
+    "max_gap_days",
+    "returns_rate"
+  ],
+  "feature_stats": {
+    "tenure_days": {
+      "mean": 175.689174,
+      "std": 77.110017,
+      "median": 184.0,
+      "min": 0.0,
+      "max": 273.0
+    },
+    "recency_days": {
+      "mean": 91.915126,
+      "std": 76.592723,
+      "median": 72.0,
+      "min": 0.0,
+      "max": 273.0
+    },
+    "frequency": {
+      "mean": 3.444738,
+      "std": 5.713891,
+      "median": 2.0,
+      "min": 1.0,
+      "max": 126.0
+    },
+    "monetary": {
+      "mean": 1616.009676,
+      "std": 6034.247444,
+      "median": 559.55,
+      "min": 2.9,
+      "max": 175782.94
+    },
+    "avg_order_value": {
+      "mean": 416.013252,
+      "std": 1603.616205,
+      "median": 285.02,
+      "min": 2.9,
+      "max": 77183.6
+    },
+    "total_items": {
+      "mean": 976.514146,
+      "std": 4069.405159,
+      "median": 318.0,
+      "min": 1.0,
+      "max": 126693.0
+    },
+    "avg_items_per_order": {
+      "mean": 257.533371,
+      "std": 1476.575969,
+      "median": 152.75,
+      "min": 1.0,
+      "max": 74215.0
+    },
+    "distinct_products": {
+      "mean": 50.147114,
+      "std": 68.369773,
+      "median": 29.0,
+      "min": 1.0,
+      "max": 1189.0
+    },
+    "avg_unit_price": {
+      "mean": 3.725975,
+      "std": 11.283551,
+      "median": 2.93,
+      "min": 0.11,
+      "max": 434.65
+    },
+    "months_active": {
+      "mean": 2.461713,
+      "std": 1.946537,
+      "median": 2.0,
+      "min": 1.0,
+      "max": 9.0
+    },
+    "max_gap_days": {
+      "mean": 47.195398,
+      "std": 54.687886,
+      "median": 34.0,
+      "min": 0.0,
+      "max": 259.0
+    },
+    "returns_rate": {
+      "mean": 0.152103,
+      "std": 0.240118,
+      "median": 0.0,
+      "min": 0.0,
+      "max": 0.947368
+    }
+  },
+  "feature_importances": {
+    "tenure_days": 0.0003,
+    "recency_days": 0.0795,
+    "frequency": 0.013,
+    "monetary": 0.1155,
+    "avg_order_value": 0.1035,
+    "total_items": 0.0784,
+    "avg_items_per_order": 0.0314,
+    "distinct_products": 0.1244,
+    "avg_unit_price": 0.1077,
+    "months_active": 0.2883,
+    "max_gap_days": 0.0227,
+    "returns_rate": 0.0352
+  },
+  "feature_effects": {
+    "tenure_days": 0.0003,
+    "recency_days": -0.0795,
+    "frequency": 0.013,
+    "monetary": 0.1155,
+    "avg_order_value": -0.1035,
+    "total_items": 0.0784,
+    "avg_items_per_order": -0.0314,
+    "distinct_products": 0.1244,
+    "avg_unit_price": -0.1077,
+    "months_active": 0.2883,
+    "max_gap_days": -0.0227,
+    "returns_rate": 0.0352
+  },
+  "effect_method": "linear_coefficient",
+  "threshold": 0.3,
+  "model_type": "LogisticRegression",
+  "trained_on": {
+    "database": "data\\processed\\retail.db",
+    "cutoff_date": "2011-09-01",
+    "target_window_end": "2011-12-01",
+    "n_customers": 3314
+  }
+}

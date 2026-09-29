@@ -1,0 +1,47 @@
+# ===========================================================================
+# Render Blueprint — Repeat-Purchase Prediction API
+# https://render.com/docs/blueprint-spec
+#
+# Two ways to deploy this repo:
+#
+#   A) Native Python runtime (default below) — works on Render's free tier.
+#      Render installs requirements.txt and runs uvicorn on $PORT.
+#
+#   B) Docker runtime — uncomment the `env: docker` block below and comment
+#      out buildCommand/startCommand. The image is built from ./Dockerfile
+#      (the last stage, `api`, is the default target) and already contains
+#      the model artifacts.
+#
+# The trained artifacts live in git under model/, so the build needs no data
+# download and no training step.
+# ===========================================================================
+services:
+  - type: web
+    name: churn-predict-api
+    runtime: python
+    plan: free
+    region: singapore
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+
+    # --- Docker alternative ---
+    # env: docker
+    # dockerfilePath: ./Dockerfile
+    # dockerContext: .
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.2"
+      # Comma-separated browser origins allowed to call /predict. Set this to
+      # wherever the dashboard runs; localhost is enough for local testing.
+      - key: ALLOWED_ORIGINS
+        sync: false
+      # MODEL_DIR is intentionally unset: app/main.py derives it from its own
+      # location (./model next to the code), which survives a change of working
+      # directory. Only set it if you mount the artifacts elsewhere.
+      # - key: MODEL_DIR
+      #   value: ./model
+
+    autoDeploy: true

@@ -1,0 +1,38 @@
+# ===========================================================================
+# Local stack: FastAPI + Streamlit, wired together.
+#
+#   docker compose up --build
+#   API       http://localhost:8000  (docs at /docs)
+#   Dashboard http://localhost:8501
+#
+# The dashboard reaches the API over the compose network, so API_URL must use
+# the service name (not localhost) — localhost inside the dashboard container
+# is the container itself.
+# ===========================================================================
+services:
+  api:
+    build:
+      context: .
+      target: api
+    image: churn-predict-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Origins allowed to call the API from a browser. Add your deployed
+      # dashboard URL here.
+      ALLOWED_ORIGINS: http://localhost:8501,http://127.0.0.1:8501
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      target: dashboard
+    image: churn-predict-dashboard
+    ports:
+      - "8501:8501"
+    environment:
+      API_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped

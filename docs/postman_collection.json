@@ -1,0 +1,290 @@
+{
+  "info": {
+    "_postman_id": "8f4c2f6e-1d3b-4a76-9a2e-2f0b6d1c9a41",
+    "name": "Will Repeat - Repeat-Purchase Prediction API",
+    "description": "Contract checks for the FastAPI repeat-purchase service.\nSet the collection variable base_url (default http://localhost:8000), then Run all.\nEvery request asserts the behaviour documented in docs/API_TESTING.md.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "GET /health",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('responds 200', () => pm.response.to.have.status(200));",
+              "const b = pm.response.json();",
+              "pm.test('reports healthy with a loaded model', () => {",
+              "  pm.expect(b.status).to.eql('healthy');",
+              "  pm.expect(b.model_loaded).to.eql(true);",
+              "});",
+              "pm.test('serves all 12 features', () => pm.expect(b.feature_count).to.eql(12));",
+              "pm.test('names the model type', () => pm.expect(b.model_type).to.be.a('string').and.not.empty);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"] },
+        "description": "Liveness plus what was actually loaded (model type, feature count, threshold, headline metrics)."
+      }
+    },
+    {
+      "name": "GET /metrics",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('responds 200', () => pm.response.to.have.status(200));",
+              "const b = pm.response.json();",
+              "pm.test('test-set AUC beats coin flip', () => pm.expect(b.test_metrics.roc_auc).to.be.above(0.5));",
+              "pm.test('keeps trivial baselines visible', () => {",
+              "  pm.expect(b).to.have.property('baselines');",
+              "  pm.expect(b).to.have.property('campaign_metrics');",
+              "});",
+              "pm.test('records the frozen threshold', () => pm.expect(b.threshold).to.be.within(0, 1));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{base_url}}/metrics", "host": ["{{base_url}}"], "path": ["metrics"] },
+        "description": "Full training report. Asserts the report publishes baselines and campaign lift, not only flattering metrics."
+      }
+    },
+    {
+      "name": "GET /features",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('responds 200', () => pm.response.to.have.status(200));",
+              "const b = pm.response.json();",
+              "pm.test('12 features in a fixed order', () => pm.expect(b.feature_order).to.have.lengthOf(12));",
+              "pm.test('stats exist for every feature', () => {",
+              "  b.feature_order.forEach(f => pm.expect(b.feature_stats).to.have.property(f));",
+              "});",
+              "pm.test('effects are signed', () => {",
+              "  pm.expect(b.effect_method).to.be.a('string');",
+              "  const vals = Object.values(b.feature_effects);",
+              "  pm.expect(vals.some(v => v < 0), 'at least one negative effect').to.eql(true);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{base_url}}/features", "host": ["{{base_url}}"], "path": ["features"] },
+        "description": "Importances, signed effects and training distributions - the data behind every explanation the API returns."
+      }
+    },
+    {
+      "name": "POST /predict - engaged repeat candidate",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('responds 200', () => pm.response.to.have.status(200));",
+              "const b = pm.response.json();",
+              "pm.test('probability is a real probability', () => pm.expect(b.repeat_probability).to.be.within(0, 1));",
+              "pm.test('verdict follows the frozen threshold', () => pm.expect(b.will_repeat).to.eql(b.repeat_probability >= b.threshold));",
+              "pm.test('prediction label matches the boolean', () => pm.expect(b.prediction).to.eql(b.will_repeat ? 'Will Repeat' : 'Will Not Repeat'));",
+              "pm.test('confidence mirrors the probability', () => pm.expect(b.confidence).to.closeTo(b.repeat_probability, 1e-9));",
+              "pm.test('drivers are non-empty strings', () => {",
+              "  pm.expect(b.key_drivers).to.be.an('array').with.length.above(0);",
+              "  b.key_drivers.forEach(d => pm.expect(d).to.be.a('string').and.not.empty);",
+              "});",
+              "pm.collectionVariables.set('score_engaged', b.repeat_probability);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"tenure_days\":250,\"recency_days\":40,\"frequency\":6,\"monetary\":1850.0,\"avg_order_value\":308.33,\"total_items\":720,\"avg_items_per_order\":120.0,\"distinct_products\":45,\"avg_unit_price\":2.9,\"months_active\":5,\"max_gap_days\":62,\"returns_rate\":0.05}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{base_url}}/predict", "host": ["{{base_url}}"], "path": ["predict"] },
+        "description": "A multi-order, high-value buyer who has been quiet for about five weeks."
+      }
+    },
+    {
+      "name": "POST /predict - one-off browser",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('responds 200', () => pm.response.to.have.status(200));",
+              "const b = pm.response.json();",
+              "const engaged = pm.collectionVariables.get('score_engaged');",
+              "pm.test('run the engaged request first', () => pm.expect(engaged).to.not.eql(undefined));",
+              "pm.test('one-off buyer scores below the engaged buyer', () => pm.expect(b.repeat_probability).to.be.below(Number(engaged)));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"tenure_days\":20,\"recency_days\":18,\"frequency\":1,\"monetary\":95.0,\"avg_order_value\":95.0,\"total_items\":12,\"avg_items_per_order\":12.0,\"distinct_products\":3,\"avg_unit_price\":7.9,\"months_active\":1,\"max_gap_days\":0,\"returns_rate\":0.0}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{base_url}}/predict", "host": ["{{base_url}}"], "path": ["predict"] },
+        "description": "A single small order, recently placed. Should rank well below the engaged customer."
+      }
+    },
+    {
+      "name": "POST /predict/batch - ranking",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('responds 200', () => pm.response.to.have.status(200));",
+              "const b = pm.response.json();",
+              "pm.test('echoes the count and preserves order', () => {",
+              "  pm.expect(b.count).to.eql(2);",
+              "  pm.expect(b.predictions).to.have.lengthOf(2);",
+              "});",
+              "pm.test('engaged customer outranks the one-off buyer', () => pm.expect(b.predictions[0].repeat_probability).to.be.above(b.predictions[1].repeat_probability));",
+              "pm.test('each row carries a threshold and drivers', () => b.predictions.forEach(p => {",
+              "  pm.expect(p.threshold).to.be.a('number');",
+              "  pm.expect(p.key_drivers.length).to.be.above(0);",
+              "}));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"customers\":[{\"tenure_days\":250,\"recency_days\":40,\"frequency\":6,\"monetary\":1850.0,\"avg_order_value\":308.33,\"total_items\":720,\"avg_items_per_order\":120.0,\"distinct_products\":45,\"avg_unit_price\":2.9,\"months_active\":5,\"max_gap_days\":62,\"returns_rate\":0.05},{\"tenure_days\":20,\"recency_days\":18,\"frequency\":1,\"monetary\":95.0,\"avg_order_value\":95.0,\"total_items\":12,\"avg_items_per_order\":12.0,\"distinct_products\":3,\"avg_unit_price\":7.9,\"months_active\":1,\"max_gap_days\":0,\"returns_rate\":0.0}]}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{base_url}}/predict/batch", "host": ["{{base_url}}"], "path": ["predict", "batch"] },
+        "description": "Vectorised scoring of several customers in one pass; order preserved, 1-500 per call."
+      }
+    },
+    {
+      "name": "POST /predict - missing fields (expect 422)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('rejected with 422', () => pm.response.to.have.status(422));",
+              "pm.test('names a body field', () => {",
+              "  const d = pm.response.json().detail;",
+              "  pm.expect(d).to.be.an('array').with.length.above(0);",
+              "  pm.expect(d[0].loc).to.include('body');",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\"tenure_days\":250}", "options": { "raw": { "language": "json" } } },
+        "url": { "raw": "{{base_url}}/predict", "host": ["{{base_url}}"], "path": ["predict"] },
+        "description": "Eleven required fields are absent - must be rejected before inference, not scored with silent defaults."
+      }
+    },
+    {
+      "name": "POST /predict - out of range (expect 422)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('rejected with 422', () => pm.response.to.have.status(422));",
+              "pm.test('points at returns_rate', () => pm.expect(JSON.stringify(pm.response.json().detail)).to.include('returns_rate'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"tenure_days\":250,\"recency_days\":40,\"frequency\":6,\"monetary\":1850.0,\"avg_order_value\":308.33,\"total_items\":720,\"avg_items_per_order\":120.0,\"distinct_products\":45,\"avg_unit_price\":2.9,\"months_active\":5,\"max_gap_days\":62,\"returns_rate\":1.5}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{base_url}}/predict", "host": ["{{base_url}}"], "path": ["predict"] },
+        "description": "returns_rate must stay on [0, 1]; 1.5 is a data error, not a customer."
+      }
+    },
+    {
+      "name": "POST /predict/batch - empty list (expect 422)",
+      "event": [
+        {
+          "listen": "test",
+          "script": { "type": "text/javascript", "exec": ["pm.test('rejected with 422', () => pm.response.to.have.status(422));"] }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\"customers\":[]}", "options": { "raw": { "language": "json" } } },
+        "url": { "raw": "{{base_url}}/predict/batch", "host": ["{{base_url}}"], "path": ["predict", "batch"] },
+        "description": "An empty batch is a client bug. Batches above 500 customers are rejected the same way."
+      }
+    },
+    {
+      "name": "POST /predict - unknown extra key (expect 200)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('accepted with 200', () => pm.response.to.have.status(200));",
+              "pm.test('unknown key is ignored, never scored', () => pm.expect(pm.response.json().customer_features).to.not.have.property('customer_id'));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"tenure_days\":250,\"recency_days\":40,\"frequency\":6,\"monetary\":1850.0,\"avg_order_value\":308.33,\"total_items\":720,\"avg_items_per_order\":120.0,\"distinct_products\":45,\"avg_unit_price\":2.9,\"months_active\":5,\"max_gap_days\":62,\"returns_rate\":0.05,\"customer_id\":\"C123\"}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{base_url}}/predict", "host": ["{{base_url}}"], "path": ["predict"] },
+        "description": "Forward compatibility: extra keys from newer clients must not break scoring."
+      }
+    }
+  ]
+}

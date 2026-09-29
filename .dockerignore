@@ -1,0 +1,35 @@
+# Build artefacts / VCS
+.git
+.gitignore
+.github
+.pytest_cache
+.mypy_cache
+__pycache__/
+**/__pycache__/
+*.py[cod]
+
+# Local environments
+.venv/
+venv/
+env/
+.env
+
+# Data is 40 MB+ and is only needed to retrain, never to serve
+data/
+notebooks/
+
+# Model by-products we do NOT serve (keep the artifacts the API reads)
+model/__pycache__/
+model/train.py
+
+# Docs and local scratch
+docs/
+*.md
+_*.txt
+*.log
+
+# Frontend is a separate build target and never needed inside the API image
+frontend/__pycache__/
+
+# Tests are run on the host / CI, not inside the runtime image
+tests/

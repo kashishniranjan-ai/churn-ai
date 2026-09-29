@@ -1,7 +1,55 @@
 {
-  "accuracy": 0.714,
-  "precision": 0.4896,
-  "recall": 0.5036,
-  "f1_score": 0.4965,
-  "roc_auc": 0.7392
+  "model_type": "LogisticRegression",
+  "target": "will_repeat",
+  "target_definition": "Customer made at least one purchase between 2011-09-01 and 2011-12-01 (exclusive) \u2014 a full quarter.",
+  "n_customers": 3314,
+  "n_features": 12,
+  "positive_rate": 0.5631,
+  "threshold": 0.3,
+  "cv_roc_auc_mean": 0.7534,
+  "cv_roc_auc_std": 0.029,
+  "test_metrics": {
+    "threshold": 0.3,
+    "accuracy": 0.6244,
+    "precision": 0.6157,
+    "recall": 0.8847,
+    "f1_score": 0.7261,
+    "roc_auc": 0.7398
+  },
+  "campaign_metrics": {
+    "top_10pct": {
+      "contact_fraction": 0.1,
+      "customers_contacted": 66,
+      "precision_at_top": 0.9697,
+      "random_targeting_precision": 0.5626,
+      "lift_vs_random": 1.7236,
+      "repeaters_captured_pct": 17.16
+    },
+    "top_20pct": {
+      "contact_fraction": 0.2,
+      "customers_contacted": 133,
+      "precision_at_top": 0.8647,
+      "random_targeting_precision": 0.5626,
+      "lift_vs_random": 1.5369,
+      "repeaters_captured_pct": 30.83
+    },
+    "top_30pct": {
+      "contact_fraction": 0.3,
+      "customers_contacted": 199,
+      "precision_at_top": 0.809,
+      "random_targeting_precision": 0.5626,
+      "lift_vs_random": 1.4381,
+      "repeaters_captured_pct": 43.16
+    }
+  },
+  "baselines": {
+    "majority_class_accuracy": 0.5626,
+    "always_predict_repeat_f1": 0.7201
+  },
+  "model_selection_cv_roc_auc": {
+    "LogisticRegression": 0.7534,
+    "RandomForestClassifier": 0.7408,
+    "ExtraTreesClassifier": 0.7454,
+    "GradientBoostingClassifier": 0.7438
+  }
 }

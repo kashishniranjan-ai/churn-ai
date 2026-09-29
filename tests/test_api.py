@@ -1,179 +1,217 @@
 """
-Tests for the FastAPI prediction endpoints.
-Uses httpx + pytest with the FastAPI TestClient.
+API tests - Customer Repeat-Purchase service.  Run: python -m pytest tests/ -v
+
+Tests read real customers from data/processed/retail.db when available, so the
+API is exercised with genuine feature values. Validation tests need no database.
 """
 
+import sqlite3
 import sys
-import pathlib
-
-# Ensure the project root is on the path
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from app.main import app
+
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.main import STATE, app  # noqa: E402
+from app.schemas import FEATURE_ORDER  # noqa: E402
+
+MODEL_PATH = PROJECT_ROOT / "model" / "customer_prediction_pipeline.joblib"
+DB_PATH = PROJECT_ROOT / "data" / "processed" / "retail.db"
+
+pytestmark = pytest.mark.skipif(
+    not MODEL_PATH.exists(),
+    reason="Model artifact missing - run `python src/train_model.py` first.",
+)
 
 
 @pytest.fixture(scope="module")
 def client():
-    """Use TestClient as context manager so lifespan events fire (model loads)."""
-    with TestClient(app) as c:
-        yield c
+    """TestClient as a context manager so the lifespan startup runs."""
+    with TestClient(app) as test_client:
+        yield test_client
 
 
-# ---------------------------------------------------------------------------
-# Sample payloads
-# ---------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def real_customers():
+    """Build features for 5 real customers straight from the database."""
+    if not DB_PATH.exists():
+        pytest.skip("retail.db missing - run the data pipeline first")
+    from src.features import build_modelling_table
 
-VALID_CUSTOMER = {
-    "gender": "Male",
-    "senior_citizen": 0,
-    "tenure": 5,
-    "contract": "Month-to-month",
-    "internet_service": "Fiber optic",
-    "payment_method": "Electronic check",
-    "monthly_charges": 95.50,
-    "total_charges": 480.00,
-    "num_support_tickets": 6,
-    "num_referrals": 0,
-}
-
-STABLE_CUSTOMER = {
-    "gender": "Female",
-    "senior_citizen": 0,
-    "tenure": 60,
-    "contract": "Two year",
-    "internet_service": "DSL",
-    "payment_method": "Credit card",
-    "monthly_charges": 45.00,
-    "total_charges": 2700.00,
-    "num_support_tickets": 0,
-    "num_referrals": 5,
-}
+    returns_csv = PROJECT_ROOT / "data" / "processed" / "returns.csv"
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        table, _, _ = build_modelling_table(conn, str(returns_csv))
+    finally:
+        conn.close()
+    return table.head(5).to_dict("records")
 
 
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
-
-class TestHealthEndpoint:
-    """GET /health"""
-
-    def test_health_returns_200(self, client):
-        response = client.get("/health")
-        assert response.status_code == 200
-
-    def test_health_model_loaded(self, client):
-        response = client.get("/health")
-        data = response.json()
-        assert data["status"] == "ok"
-        assert data["model_loaded"] is True
-
-    def test_health_has_metrics(self, client):
-        response = client.get("/health")
-        data = response.json()
-        assert "training_metrics" in data
+def _payload(**overrides) -> dict:
+    """A valid customer with optional per-field overrides."""
+    base = {
+        "tenure_days": 250,
+        "recency_days": 40,
+        "frequency": 6,
+        "monetary": 1850.0,
+        "avg_order_value": 308.33,
+        "total_items": 720,
+        "avg_items_per_order": 120.0,
+        "distinct_products": 45,
+        "avg_unit_price": 2.9,
+        "months_active": 5,
+        "max_gap_days": 62,
+        "returns_rate": 0.05,
+    }
+    base.update(overrides)
+    return base
 
 
-class TestPredictEndpoint:
-    """POST /predict"""
-
-    def test_predict_returns_200(self, client):
-        response = client.post("/predict", json=VALID_CUSTOMER)
-        assert response.status_code == 200
-
-    def test_predict_has_required_fields(self, client):
-        response = client.post("/predict", json=VALID_CUSTOMER)
-        data = response.json()
-        assert "prediction" in data
-        assert "churn_probability" in data
-        assert "confidence" in data
-        assert "risk_level" in data
-        assert "risk_factors" in data
-        assert "timestamp" in data
-
-    def test_predict_probability_range(self, client):
-        response = client.post("/predict", json=VALID_CUSTOMER)
-        data = response.json()
-        assert 0.0 <= data["churn_probability"] <= 1.0
-        assert 0.0 <= data["confidence"] <= 1.0
-
-    def test_predict_valid_prediction_label(self, client):
-        response = client.post("/predict", json=VALID_CUSTOMER)
-        data = response.json()
-        assert data["prediction"] in ("Churn", "No Churn")
-
-    def test_high_risk_customer(self, client):
-        """Short-tenure, month-to-month, fiber optic, e-check -> likely high risk."""
-        response = client.post("/predict", json=VALID_CUSTOMER)
-        data = response.json()
-        # Should have risk factors
-        assert len(data["risk_factors"]) > 0
-
-    def test_stable_customer(self, client):
-        """Long-tenure, two-year contract, low charges -> likely low risk."""
-        response = client.post("/predict", json=STABLE_CUSTOMER)
-        data = response.json()
-        assert data["churn_probability"] < 0.5
-
-    def test_invalid_gender_returns_422(self, client):
-        bad = VALID_CUSTOMER.copy()
-        bad["gender"] = "Other"
-        response = client.post("/predict", json=bad)
-        assert response.status_code == 422
-
-    def test_invalid_contract_returns_422(self, client):
-        bad = VALID_CUSTOMER.copy()
-        bad["contract"] = "Weekly"
-        response = client.post("/predict", json=bad)
-        assert response.status_code == 422
-
-    def test_negative_tenure_returns_422(self, client):
-        bad = VALID_CUSTOMER.copy()
-        bad["tenure"] = -5
-        response = client.post("/predict", json=bad)
-        assert response.status_code == 422
-
-    def test_missing_field_returns_422(self, client):
-        incomplete = {"gender": "Male", "tenure": 10}
-        response = client.post("/predict", json=incomplete)
-        assert response.status_code == 422
+# ---------------------------------------------------------------- startup ---
+def test_startup_loads_pipeline(client):
+    assert client.get("/health").status_code == 200
+    assert STATE["pipeline"] is not None
+    assert STATE["feature_order"] == list(FEATURE_ORDER)
+    assert 0.0 < STATE["threshold"] < 1.0
 
 
-class TestBatchEndpoint:
-    """POST /predict/batch"""
-
-    def test_batch_prediction(self, client):
-        payload = {"customers": [VALID_CUSTOMER, STABLE_CUSTOMER]}
-        response = client.post("/predict/batch", json=payload)
-        assert response.status_code == 200
-        data = response.json()
-        assert data["count"] == 2
-        assert len(data["predictions"]) == 2
-
-    def test_batch_too_large_returns_400(self, client):
-        payload = {"customers": [VALID_CUSTOMER] * 101}
-        response = client.post("/predict/batch", json=payload)
-        assert response.status_code == 400
+def test_health(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "healthy"
+    assert body["model_loaded"] is True
+    assert body["feature_count"] == len(FEATURE_ORDER)
 
 
-class TestModelInfoEndpoint:
-    """GET /model/info"""
-
-    def test_model_info(self, client):
-        response = client.get("/model/info")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["model_type"] == "RandomForestClassifier"
-        assert data["n_estimators"] == 200
-        assert "features" in data
+def test_metrics_reports_baselines(client):
+    body = client.get("/metrics").json()
+    assert body["model_type"]
+    assert body["test_metrics"]["roc_auc"] > 0.5
+    # The report must keep baselines visible, not only flattering metrics.
+    assert "baselines" in body
+    assert "campaign_metrics" in body
 
 
-class TestRootEndpoint:
-    """GET /"""
+# -------------------------------------------------------------- prediction ---
+def test_predict_single(client):
+    response = client.post("/predict", json=_payload())
+    assert response.status_code == 200
+    body = response.json()
+    for key in (
+        "prediction",
+        "will_repeat",
+        "repeat_probability",
+        "confidence",
+        "engagement_tier",
+        "key_drivers",
+        "threshold",
+    ):
+        assert key in body, f"missing '{key}'"
+    assert 0.0 <= body["repeat_probability"] <= 1.0
+    assert body["prediction"] in ("Will Repeat", "Will Not Repeat")
 
-    def test_root(self, client):
-        response = client.get("/")
-        assert response.status_code == 200
-        data = response.json()
-        assert "message" in data
+
+def test_prediction_matches_threshold(client):
+    body = client.post("/predict", json=_payload()).json()
+    expected = (
+        "Will Repeat" if body["repeat_probability"] >= body["threshold"] else "Will Not Repeat"
+    )
+    assert body["prediction"] == expected
+    assert body["will_repeat"] is (body["repeat_probability"] >= body["threshold"])
+
+
+def test_prediction_is_deterministic(client):
+    first = client.post("/predict", json=_payload()).json()["repeat_probability"]
+    second = client.post("/predict", json=_payload()).json()["repeat_probability"]
+    assert first == pytest.approx(second)
+
+
+def test_key_drivers_reference_real_feature_names(client):
+    body = client.post("/predict", json=_payload()).json()
+    assert len(body["key_drivers"]) == 3
+    labels = " ".join(body["key_drivers"]).lower()
+    # Drivers must be grounded in actual inputs, not generic churn filler.
+    assert any(
+        token in labels
+        for token in ("tenure", "purchase", "order", "spend", "product", "return", "gap", "item")
+    )
+
+
+def test_predict_on_real_customers(client, real_customers):
+    for record in real_customers:
+        payload = {
+            f: (float(record[f]) if f == "returns_rate" else int(record[f]))
+            for f in FEATURE_ORDER
+        }
+        response = client.post("/predict", json=payload)
+        assert response.status_code == 200, response.text
+        assert 0.0 <= response.json()["repeat_probability"] <= 1.0
+
+
+def test_batch_predict(client):
+    response = client.post(
+        "/predict/batch",
+        json={"customers": [_payload(), _payload(frequency=1, months_active=1, monetary=10.0)]},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["count"] == 2
+    assert len(body["predictions"]) == 2
+
+
+def test_batch_ranking_is_sensible(client):
+    """Engaged multi-order customer must outrank a tiny one-off buyer."""
+    response = client.post(
+        "/predict/batch",
+        json={
+            "customers": [
+                _payload(),
+                _payload(
+                    tenure_days=5, recency_days=200, frequency=1, monetary=12.0,
+                    avg_order_value=12.0, total_items=3, avg_items_per_order=3,
+                    distinct_products=1, avg_unit_price=4.0, months_active=1,
+                    max_gap_days=0, returns_rate=0.0,
+                ),
+            ]
+        },
+    )
+    scores = [p["repeat_probability"] for p in response.json()["predictions"]]
+    assert scores[0] > scores[1]
+
+
+# ------------------------------------------------------------- validation ---
+@pytest.mark.parametrize("field", list(FEATURE_ORDER))
+def test_missing_field_rejected(client, field):
+    payload = _payload()
+    del payload[field]
+    assert client.post("/predict", json=payload).status_code == 422
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("monetary", -1.0),
+        ("frequency", 0),
+        ("tenure_days", -5),
+        ("returns_rate", 1.5),
+        ("returns_rate", -0.1),
+        ("total_items", -3),
+        ("months_active", 9999),
+    ],
+)
+def test_out_of_range_rejected(client, field, value):
+    assert client.post("/predict", json=_payload(**{field: value})).status_code == 422
+
+
+def test_empty_batch_rejected(client):
+    assert client.post("/predict/batch", json={"customers": []}).status_code == 422
+
+
+def test_unknown_field_is_not_fatal(client):
+    """Extra keys must not break inference (forward-compatible clients)."""
+    assert client.post("/predict", json=_payload(customer_id="C123")).status_code == 200
+
